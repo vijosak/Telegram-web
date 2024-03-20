@@ -2421,6 +2421,7 @@ a.im_message_fwd_photo {
 .reply_markup_button_wrap {
   display: inline-block;
   padding: 0 4px;
+  vertical-align: bottom;
 }
 .reply_markup_button {
   color: #3a6d99;
@@ -5023,4 +5024,10 @@ a.countries_modal_search_clear {
   }
 }
 
-
+.visually-hidden { /* https://snook.ca/archives/html_and_css/hiding-content-for-accessibility */
+  position: absolute !important;
+  height: 1px; width: 1px;
+  overflow: hidden;
+  clip: rect(1px 1px 1px 1px); /* IE6, IE7 */
+  clip: rect(1px, 1px, 1px, 1px);
+}

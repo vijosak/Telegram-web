@@ -161,6 +161,18 @@ angular.module('myApp.controllers', ['myApp.i18n'])
     var nextTimeout
     var updatePasswordTimeout = false
 
+    $scope.try_desktop = {
+      shown: false,
+      domain: Config.Navigator.osX ? 'macos.telegram.org' : 'desktop.telegram.org'
+    }
+    $scope.closeTryDesktop = function() {
+      $scope.try_desktop.shown = false;
+      ConfigStorage.set({try_desktop_hidden: 1})
+    };
+    ConfigStorage.get('try_desktop_hidden', function (td_hidden) {
+      $scope.try_desktop.shown = !Config.Navigator.mobile && !td_hidden;
+    })
+
     function saveAuth (result) {
       MtpApiManager.setUserAuth(options.dcID, {
         id: result.user.id
@@ -177,7 +189,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
       var badPhone = !fullPhone.match(/^[\d\-+\s]+$/)
       if (!badPhone) {
         fullPhone = fullPhone.replace(/\D/g, '')
-        if (fullPhone.length < 7) {
+        if (fullPhone.length < 7 || fullPhone.length > 25) {
           badPhone = true
         }
       }
@@ -511,6 +523,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
       canReply: false,
       canDelete: false,
       canEdit: false,
+      canReport: false,
       actions: function () {
         return $scope.historyState.selectActions ? 'selected' : ($scope.historyState.botActions ? 'bot' : ($scope.historyState.channelActions ? 'channel' : false))
       },
@@ -518,6 +531,22 @@ angular.module('myApp.controllers', ['myApp.i18n'])
       missedCount: 0,
       skipped: false
     }
+
+    $scope.try_desktop = {
+      shown: false,
+      domain: Config.Navigator.osX ? 'macos.telegram.org' : 'desktop.telegram.org'
+    }
+    $scope.closeTryDesktop = function() {
+      $scope.try_desktop.shown = false;
+      onContentLoaded(function () {
+        $scope.$broadcast('ui_dialogs_update');
+        $scope.$broadcast('ui_panel_update');
+      })
+      ConfigStorage.set({try_desktop_hidden: 1})
+    };
+    ConfigStorage.get('try_desktop_hidden', function (td_hidden) {
+      $scope.try_desktop.shown = !Config.Navigator.mobile && !td_hidden;
+    })
 
     $scope.openSettings = function () {
       $modal.open({
@@ -950,11 +979,14 @@ angular.module('myApp.controllers', ['myApp.i18n'])
     function getDialogs (force) {
       var curJump = ++jump
 
-      $timeout.cancel(searchTimeoutPromise)
+      if (searchTimeoutPromise) {
+        $timeout.cancel(searchTimeoutPromise)
+      }
 
       if (searchMessages) {
         searchTimeoutPromise = (force || maxID) ? $q.when() : $timeout(angular.noop, 500)
         return searchTimeoutPromise.then(function () {
+          searchTimeoutPromise = false;
           var searchPeerID = $scope.searchPeer || false
           return AppMessagesManager.getSearch(searchPeerID, $scope.search.query, {_: 'inputMessagesFilterEmpty'}, maxID).then(function (result) {
             if (curJump != jump) {
@@ -1098,6 +1130,15 @@ angular.module('myApp.controllers', ['myApp.i18n'])
             }
             var wrapDialog = searchMessages ? undefined : dialog
             var wrappedDialog = AppMessagesManager.wrapForDialog(dialog.top_message, wrapDialog)
+
+            if (searchMessages &&
+                $scope.searchPeer) {
+              var message = AppMessagesManager.getMessage(dialog.top_message)
+              if (message.fromID > 0) {
+                wrappedDialog.peerID = message.fromID
+                wrappedDialog.foundInHistory = true
+              }
+            }
 
             if (searchMessages) {
               wrappedDialog.unreadCount = -1
@@ -1246,6 +1287,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
     $scope.selectedEdit = selectedEdit
     $scope.selectedCancel = selectedCancel
     $scope.selectedFlush = selectedFlush
+    $scope.selectedReport = selectedReport
     $scope.selectInlineBot = selectInlineBot
 
     $scope.startBot = startBot
@@ -1755,6 +1797,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
 
         if (Config.Mobile) {
           $scope.historyState.canEdit = AppMessagesManager.canEditMessage(messageID)
+          $scope.historyState.canReport = AppMessagesManager.canReportMessage(messageID)
 
           $modal.open({
             templateUrl: templateUrl('message_actions_modal'),
@@ -1776,6 +1819,10 @@ angular.module('myApp.controllers', ['myApp.i18n'])
 
               case 'forward':
                 selectedForward(messageID)
+                break
+
+              case 'report':
+                selectedReport(messageID)
                 break
 
               case 'select':
@@ -1837,6 +1884,15 @@ angular.module('myApp.controllers', ['myApp.i18n'])
       if ($scope.selectedCount == 1) {
         angular.forEach($scope.selectedMsgs, function (t, messageID) {
           $scope.historyState.canEdit = AppMessagesManager.canEditMessage(messageID)
+          $scope.historyState.canReport = AppMessagesManager.canReportMessage(messageID)
+        })
+      } else {
+        $scope.historyState.canEdit = false
+        $scope.historyState.canReport = false
+        angular.forEach($scope.selectedMsgs, function (t, messageID) {
+          if (AppMessagesManager.canReportMessage(messageID)) {
+            $scope.historyState.canReport = true
+          }
         })
       }
       $scope.$broadcast('messages_select')
@@ -1975,6 +2031,38 @@ angular.module('myApp.controllers', ['myApp.i18n'])
               }
             })
           }    
+        })
+      }
+    }
+
+    function selectedReport (selectedMessageID) {
+      var selectedMessageIDs = []
+      if (selectedMessageID) {
+        selectedMessageIDs.push(selectedMessageID)
+      } else if ($scope.selectedCount > 0) {
+        angular.forEach($scope.selectedMsgs, function (t, messageID) {
+          selectedMessageIDs.push(messageID)
+        })
+      }
+      if (selectedMessageIDs.length) {
+        $modal.open({
+          templateUrl: templateUrl('report_msgs_modal'),
+          controller: 'ReportMessagesModalController',
+          windowClass: 'md_simple_modal_window mobile_modal',
+          scope: $scope.$new()
+        }).result.then(function (inputReason) {
+          selectedCancel()
+          AppMessagesManager.reportMessages(selectedMessageIDs, inputReason).then(function () {
+            var toastData = toaster.pop({
+              type: 'info',
+              body: _('confirm_modal_report_success'),
+              bodyOutputType: 'trustedHtml',
+              clickHandler: function () {
+                toaster.clear(toastData)
+              },
+              showCloseButton: false
+            })
+          })
         })
       }
     }
@@ -3739,7 +3827,9 @@ angular.module('myApp.controllers', ['myApp.i18n'])
 
     $scope.settings = {notifications: true}
 
-    AppProfileManager.getProfile($scope.userID, $scope.override).then(function (userFull) {
+    var profilePromise = AppProfileManager.getProfile($scope.userID, $scope.override)
+
+    profilePromise.then(function (userFull) {
       $scope.blocked = userFull.pFlags.blocked
       $scope.bot_info = userFull.bot_info
       $scope.rAbout = userFull.rAbout
@@ -3761,6 +3851,12 @@ angular.module('myApp.controllers', ['myApp.i18n'])
 
     $scope.goToHistory = function () {
       $rootScope.$broadcast('history_focus', {peerString: peerString})
+    }
+
+    $scope.openUserPic = function () {
+      profilePromise.then(function () {
+        $scope.openPhoto($scope.user.photo.photo_id, {p: $scope.userID})
+      })
     }
 
     $scope.flushHistory = function (justClear) {
@@ -4191,6 +4287,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
   })
 
   .controller('SettingsModalController', function ($rootScope, $scope, $timeout, $modal, AppUsersManager, AppChatsManager, AppPhotosManager, MtpApiManager, Storage, NotificationsManager, MtpApiFileManager, PasswordManager, ApiUpdatesManager, ChangelogNotifyService, LayoutSwitchService, WebPushApiManager, AppRuntimeManager, ErrorService, _) {
+
     $scope.profile = {}
     $scope.photo = {}
     $scope.version = Config.App.version
@@ -4199,7 +4296,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
       $scope.profile = AppUsersManager.getUser(id)
     })
 
-    MtpApiManager.invokeApi('users.getFullUser', {
+    var profilePromise = MtpApiManager.invokeApi('users.getFullUser', {
       id: {_: 'inputUserSelf'}
     }).then(function (userFullResult) {
       AppUsersManager.saveApiUser(userFullResult.user)
@@ -4210,6 +4307,24 @@ angular.module('myApp.controllers', ['myApp.i18n'])
       }
     })
 
+    $scope.contentSettings = {notReady: true}
+    var contentSettingsPromise = MtpApiManager.invokeApi('account.getContentSettings', {}).then(function (contentsResult) {
+      $scope.contentSettings = contentsResult
+    })
+
+    $scope.toggleContentSettings = function () {
+      if ($scope.contentSettings.pFlags &&
+          $scope.contentSettings.pFlags.sensitive_enabled) {
+        delete $scope.contentSettings.pFlags.sensitive_enabled
+        MtpApiManager.invokeApi('account.setContentSettings', {flags: 0})
+      } else {
+        return ErrorService.confirm({type: 'CONTENT_SETTINGS_SENSITIVE'}).then(function () {
+          $scope.contentSettings.pFlags.sensitive_enabled = true
+          MtpApiManager.invokeApi('account.setContentSettings', {flags: 1})
+        })
+      }
+    }
+
     $scope.notify = {volume: 0.5}
     $scope.send = {}
 
@@ -4219,6 +4334,12 @@ angular.module('myApp.controllers', ['myApp.i18n'])
     updatePasswordState()
     var updatePasswordTimeout = false
     var stopped = false
+
+    $scope.openUserPic = function () {
+      profilePromise.then(function () {
+        $scope.openPhoto($scope.profile.photo.photo_id, {p: $scope.profile.id})
+      })
+    }
 
     $scope.changePassword = function (options) {
       options = options || {}
@@ -4500,6 +4621,18 @@ angular.module('myApp.controllers', ['myApp.i18n'])
         controller: 'UsernameEditModalController',
         windowClass: 'md_simple_modal_window mobile_modal'
       })
+    }
+  })
+
+  .controller('ReportMessagesModalController', function ($scope, $modalInstance) {
+    $scope.reason = {_: 'inputReportReasonSpam', text: ''}
+    $scope.toggleReportReason = function (reason) {
+      $scope.reason = {_: reason}
+      if (reason == 'inputReportReasonOther') {
+        onContentLoaded(function () {
+          $scope.$broadcast('ui_reason_text_focus')
+        })
+      }
     }
   })
 
